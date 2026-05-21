@@ -41,9 +41,9 @@ For Xcode: open `Package.swift`.
 
 ## Workflow
 
-- **Never edit in the main worktree.** Use `EnterWorktree` (preferred) or `git worktree add`, branched off latest local `main`.
+- Edit directly on the current branch. Do not create worktrees.
 - Branch name matches topic: `feat/<topic>`, `fix/<topic>`. One coherent change per round.
-- `main` is protected — direct push is rejected. All changes ship via PR **targeting `main`**. No chain PRs (A → B → main) — wait for the dependency to merge, then rebase.
+- Do not automatically create pull requests unless explicitly asked.
 - Conventional commit messages (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`). Never `--amend` unless asked.
 - After changes: run the matching verification (`swift build` / `swift test` / manual). If no check exists, say so in the summary and still commit.
 - Never `git reset --hard`, force-push, or overwrite user changes without explicit approval. If unexpected state appears, inspect — don't bulldoze.
