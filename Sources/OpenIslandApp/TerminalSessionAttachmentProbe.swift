@@ -154,7 +154,7 @@ struct TerminalSessionAttachmentProbe {
 
             return terminalName != "ghostty" && terminalName != "terminal"
                 && terminalName != "iterm"
-                && terminalName != "kaku" && terminalName != "wezterm"
+                && terminalName != "kitty" && terminalName != "kaku" && terminalName != "wezterm"
         }
         let activeProcessesBySessionID = activeProcessesBySessionID(
             for: sessions,

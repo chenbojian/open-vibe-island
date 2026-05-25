@@ -570,7 +570,9 @@ final class AppModel {
             let tty = s.jumpTarget?.terminalTTY ?? "nil"
             let tmux = s.jumpTarget?.tmuxTarget ?? "nil"
             let source = sessionDiscoverySource(s)
-            lines.append("  [\(s.id)] \(s.spotlightHeadlineText) | phase=\(s.phase) source=\(source) terminal=\(terminal) hookManaged=\(hookManaged) ended=\(ended) alive=\(alive) tty=\(tty) tmux=\(tmux)")
+            let attachment = s.attachmentState
+            let notSeenCount = s.processNotSeenCount
+            lines.append("  [\(s.id)] \(s.spotlightHeadlineText) | phase=\(s.phase) source=\(source) terminal=\(terminal) hookManaged=\(hookManaged) ended=\(ended) alive=\(alive) attachment=\(attachment) notSeen=\(notSeenCount) tty=\(tty) tmux=\(tmux)")
         }
         lines.append("[IdleDebug] ntfyEnabled=\(ntfyEnabled) isUserAway=\(idleMonitor.isUserAway) idleSeconds=\(Int(idleMonitor.idleSeconds))")
         let output = lines.joined(separator: "\n")

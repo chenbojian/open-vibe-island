@@ -946,6 +946,8 @@ final class ProcessMonitoringCoordinator {
             return "cmux"
         case "warp", "warpterminal":
             return "Warp"
+        case "kitty":
+            return "Kitty"
         case "kaku":
             return "Kaku"
         case "wezterm":
