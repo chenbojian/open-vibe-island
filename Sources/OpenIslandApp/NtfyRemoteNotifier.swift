@@ -153,71 +153,63 @@ final class NtfyRemoteNotifier {
 
     private nonisolated func listenForResponse(requestID: String, sessionID: String) async {
         let config = await self.config
-        let streamURLString = "\(config.server)/\(config.responseTopic)/json?since=1s"
-        guard let streamURL = URL(string: streamURLString) else {
-            Self.logger.error("listenForResponse: invalid stream URL '\(streamURLString)'")
+        var wsURLString = config.server
+        if wsURLString.hasPrefix("https://") {
+            wsURLString = "wss://" + wsURLString.dropFirst(8)
+        } else if wsURLString.hasPrefix("http://") {
+            wsURLString = "ws://" + wsURLString.dropFirst(7)
+        }
+        wsURLString += "/\(config.responseTopic)/ws"
+
+        guard let wsURL = URL(string: wsURLString) else {
+            Self.logger.error("listenForResponse: invalid WebSocket URL '\(wsURLString)'")
             return
         }
 
-        Self.logger.info("listenForResponse: starting stream at \(streamURLString), requestID=\(requestID), sessionID=\(sessionID)")
+        Self.logger.info("listenForResponse: connecting WebSocket at \(wsURLString), requestID=\(requestID), sessionID=\(sessionID)")
+
+        var backoff: TimeInterval = 2
 
         while !Task.isCancelled {
-            var request = URLRequest(url: streamURL)
-            request.timeoutInterval = .infinity
-
-            guard let (bytes, response) = try? await URLSession.shared.bytes(for: request) else {
-                Self.logger.error("listenForResponse: failed to open stream connection, retrying in 2s...")
-                try? await Task.sleep(for: .seconds(2))
-                continue
-            }
-
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            Self.logger.info("listenForResponse: stream connected, HTTP \(statusCode)")
-
-            if statusCode != 200 {
-                Self.logger.error("listenForResponse: unexpected status \(statusCode), retrying in 2s...")
-                try? await Task.sleep(for: .seconds(2))
-                continue
-            }
+            let wsTask = URLSession.shared.webSocketTask(with: wsURL)
+            wsTask.resume()
 
             do {
-                for try await line in bytes.lines {
-                    guard !Task.isCancelled else {
-                        Self.logger.info("listenForResponse: task cancelled, stopping")
-                        return
-                    }
+                backoff = 2
+                while !Task.isCancelled {
+                    let message = try await wsTask.receive()
 
-                    let truncated = String(line.prefix(200))
-                    Self.logger.debug("listenForResponse: received line: \(truncated)")
-
-                    guard let data = line.data(using: .utf8) else {
-                        Self.logger.warning("listenForResponse: line not valid UTF-8")
+                    let text: String
+                    switch message {
+                    case .string(let s):
+                        text = s
+                    case .data(let d):
+                        guard let s = String(data: d, encoding: .utf8) else { continue }
+                        text = s
+                    @unknown default:
                         continue
                     }
 
-                    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                        Self.logger.debug("listenForResponse: line is not valid JSON object")
+                    Self.logger.debug("listenForResponse: received: \(String(text.prefix(200)))")
+
+                    guard let data = text.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                         continue
                     }
 
                     guard let messageStr = json["message"] as? String else {
-                        Self.logger.debug("listenForResponse: no 'message' field in event (type=\(json["event"] as? String ?? "unknown"))")
+                        Self.logger.debug("listenForResponse: no 'message' field (event=\(json["event"] as? String ?? "unknown"))")
                         continue
                     }
 
                     guard let messageData = messageStr.data(using: .utf8),
                           let responsePayload = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
-                        Self.logger.warning("listenForResponse: 'message' field is not valid JSON: \(String(messageStr.prefix(100)))")
+                        Self.logger.warning("listenForResponse: 'message' not valid JSON: \(String(messageStr.prefix(100)))")
                         continue
                     }
 
-                    guard let respRequestID = responsePayload["requestId"] as? String else {
-                        Self.logger.warning("listenForResponse: response has no 'requestId' field, keys=\(Array(responsePayload.keys))")
-                        continue
-                    }
-
-                    guard respRequestID == requestID else {
-                        Self.logger.info("listenForResponse: requestId mismatch, got=\(respRequestID), expected=\(requestID)")
+                    guard let respRequestID = responsePayload["requestId"] as? String,
+                          respRequestID == requestID else {
                         continue
                     }
 
@@ -225,25 +217,26 @@ final class NtfyRemoteNotifier {
 
                     await MainActor.run { [responsePayload] in
                         if let approved = responsePayload["approved"] as? Bool {
-                            Self.logger.info("listenForResponse: invoking onPermissionResponse(sessionID=\(sessionID), approved=\(approved)), callback set=\(self.onPermissionResponse != nil)")
+                            Self.logger.info("listenForResponse: onPermissionResponse(sessionID=\(sessionID), approved=\(approved))")
                             self.onPermissionResponse?(sessionID, approved)
                         } else if let answer = responsePayload["answer"] as? String {
-                            Self.logger.info("listenForResponse: invoking onQuestionResponse(sessionID=\(sessionID), answer=\(answer)), callback set=\(self.onQuestionResponse != nil)")
+                            Self.logger.info("listenForResponse: onQuestionResponse(sessionID=\(sessionID), answer=\(answer))")
                             self.onQuestionResponse?(sessionID, answer)
                         } else {
-                            Self.logger.warning("listenForResponse: matched requestId but no 'approved' or 'answer' field, keys=\(Array(responsePayload.keys))")
+                            Self.logger.warning("listenForResponse: matched requestId but no 'approved'/'answer', keys=\(Array(responsePayload.keys))")
                         }
                         self.pendingRequestID = nil
                         self.pendingTask = nil
                     }
                     return
                 }
-                Self.logger.info("listenForResponse: stream ended, reconnecting...")
             } catch {
-                Self.logger.error("listenForResponse: stream error: \(error.localizedDescription), reconnecting...")
+                Self.logger.error("listenForResponse: WebSocket error: \(error.localizedDescription), reconnecting in \(Int(backoff))s...")
             }
 
-            try? await Task.sleep(for: .seconds(1))
+            wsTask.cancel(with: .goingAway, reason: nil)
+            try? await Task.sleep(for: .seconds(backoff))
+            backoff = min(backoff * 2, 60)
         }
     }
 
