@@ -17,8 +17,18 @@ final class NtfyRemoteNotifier {
         var responseTopic: String { "\(topic)-response" }
     }
 
-    private var pendingTask: Task<Void, Never>?
-    private(set) var pendingRequestID: String?
+    enum PendingRequestKind {
+        case permission(sessionID: String)
+        case question(sessionID: String)
+    }
+
+    private struct PendingRequest {
+        let kind: PendingRequestKind
+        let createdAt: Date
+    }
+
+    private var pendingRequests: [String: PendingRequest] = [:]
+    private var connectionTask: Task<Void, Never>?
 
     var config: Config {
         Config(
@@ -27,8 +37,33 @@ final class NtfyRemoteNotifier {
         )
     }
 
+    var hasPendingRequests: Bool { !pendingRequests.isEmpty }
+
     var onPermissionResponse: ((String, Bool) -> Void)?
     var onQuestionResponse: ((String, String) -> Void)?
+
+    // MARK: - Lifecycle
+
+    func start() {
+        guard connectionTask == nil else { return }
+        guard config.isConfigured else {
+            Self.logger.info("start: ntfy not configured, skipping WebSocket connection")
+            return
+        }
+        Self.logger.info("start: launching persistent WebSocket connection")
+        connectionTask = Task { [weak self] in
+            await self?.runWebSocketLoop()
+        }
+    }
+
+    func stop() {
+        Self.logger.info("stop: tearing down WebSocket, clearing \(self.pendingRequests.count) pending requests")
+        connectionTask?.cancel()
+        connectionTask = nil
+        pendingRequests.removeAll()
+    }
+
+    // MARK: - Send Notifications
 
     func sendPermissionNotification(sessionID: String, session: AgentSession) {
         guard config.isConfigured,
@@ -38,9 +73,12 @@ final class NtfyRemoteNotifier {
         }
 
         let requestID = UUID().uuidString
-        pendingRequestID = requestID
+        pendingRequests[requestID] = PendingRequest(
+            kind: .permission(sessionID: sessionID),
+            createdAt: Date()
+        )
 
-        Self.logger.info("Sending permission notification: sessionID=\(sessionID), requestID=\(requestID), tool=\(request.toolName ?? "nil")")
+        Self.logger.info("Sending permission notification: sessionID=\(sessionID), requestID=\(requestID), tool=\(request.toolName ?? "nil"), pending=\(self.pendingRequests.count)")
 
         let title = "Open Island: \(session.title) · \(request.toolName ?? "Permission")"
         let message = request.summary.isEmpty ? request.title : request.summary
@@ -53,6 +91,7 @@ final class NtfyRemoteNotifier {
                 "url": responseURL,
                 "method": "POST",
                 "body": "{\"requestId\":\"\(requestID)\",\"approved\":true}",
+                "clear": true,
             ],
             [
                 "action": "http",
@@ -60,6 +99,7 @@ final class NtfyRemoteNotifier {
                 "url": responseURL,
                 "method": "POST",
                 "body": "{\"requestId\":\"\(requestID)\",\"approved\":false}",
+                "clear": true,
             ],
         ]
 
@@ -73,10 +113,6 @@ final class NtfyRemoteNotifier {
         Task {
             await postNotification(body: body)
         }
-
-        pendingTask = Task { [weak self] in
-            await self?.listenForResponse(requestID: requestID, sessionID: sessionID)
-        }
     }
 
     func sendQuestionNotification(sessionID: String, session: AgentSession) {
@@ -87,9 +123,12 @@ final class NtfyRemoteNotifier {
         }
 
         let requestID = UUID().uuidString
-        pendingRequestID = requestID
+        pendingRequests[requestID] = PendingRequest(
+            kind: .question(sessionID: sessionID),
+            createdAt: Date()
+        )
 
-        Self.logger.info("Sending question notification: sessionID=\(sessionID), requestID=\(requestID)")
+        Self.logger.info("Sending question notification: sessionID=\(sessionID), requestID=\(requestID), pending=\(self.pendingRequests.count)")
 
         let title = "Open Island: \(session.title) · Question"
         let questionText = prompt.questions.first?.question ?? prompt.title
@@ -104,6 +143,7 @@ final class NtfyRemoteNotifier {
                 "url": responseURL,
                 "method": "POST",
                 "body": "{\"requestId\":\"\(requestID)\",\"answer\":\"\(escapeJSON(option.label))\"}",
+                "clear": true,
             ])
         }
 
@@ -117,17 +157,6 @@ final class NtfyRemoteNotifier {
         Task {
             await postNotification(body: body)
         }
-
-        pendingTask = Task { [weak self] in
-            await self?.listenForResponse(requestID: requestID, sessionID: sessionID)
-        }
-    }
-
-    func cancel() {
-        Self.logger.info("Cancelling pending ntfy listener, requestID=\(self.pendingRequestID ?? "nil")")
-        pendingTask?.cancel()
-        pendingTask = nil
-        pendingRequestID = nil
     }
 
     // MARK: - Private
@@ -151,93 +180,138 @@ final class NtfyRemoteNotifier {
         }
     }
 
-    private nonisolated func listenForResponse(requestID: String, sessionID: String) async {
+    private nonisolated func runWebSocketLoop() async {
         let config = await self.config
-        var wsURLString = config.server
-        if wsURLString.hasPrefix("https://") {
-            wsURLString = "wss://" + wsURLString.dropFirst(8)
-        } else if wsURLString.hasPrefix("http://") {
-            wsURLString = "ws://" + wsURLString.dropFirst(7)
-        }
-        wsURLString += "/\(config.responseTopic)/ws"
-
-        guard let wsURL = URL(string: wsURLString) else {
-            Self.logger.error("listenForResponse: invalid WebSocket URL '\(wsURLString)'")
+        let wsURL = Self.buildWebSocketURL(config: config)
+        guard let wsURL else {
+            Self.logger.error("runWebSocketLoop: invalid WebSocket URL for server '\(config.server)'")
             return
         }
 
-        Self.logger.info("listenForResponse: connecting WebSocket at \(wsURLString), requestID=\(requestID), sessionID=\(sessionID)")
+        Self.logger.info("runWebSocketLoop: target \(wsURL.absoluteString)")
 
-        var backoff: TimeInterval = 2
+        var consecutiveFailures = 0
 
         while !Task.isCancelled {
             let wsTask = URLSession.shared.webSocketTask(with: wsURL)
             wsTask.resume()
 
+            Self.logger.info("runWebSocketLoop: WebSocket connected (failures=\(consecutiveFailures))")
+
             do {
-                backoff = 2
+                consecutiveFailures = 0
                 while !Task.isCancelled {
                     let message = try await wsTask.receive()
-
-                    let text: String
-                    switch message {
-                    case .string(let s):
-                        text = s
-                    case .data(let d):
-                        guard let s = String(data: d, encoding: .utf8) else { continue }
-                        text = s
-                    @unknown default:
-                        continue
-                    }
-
-                    Self.logger.debug("listenForResponse: received: \(String(text.prefix(200)))")
-
-                    guard let data = text.data(using: .utf8),
-                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                        continue
-                    }
-
-                    guard let messageStr = json["message"] as? String else {
-                        Self.logger.debug("listenForResponse: no 'message' field (event=\(json["event"] as? String ?? "unknown"))")
-                        continue
-                    }
-
-                    guard let messageData = messageStr.data(using: .utf8),
-                          let responsePayload = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
-                        Self.logger.warning("listenForResponse: 'message' not valid JSON: \(String(messageStr.prefix(100)))")
-                        continue
-                    }
-
-                    guard let respRequestID = responsePayload["requestId"] as? String,
-                          respRequestID == requestID else {
-                        continue
-                    }
-
-                    Self.logger.info("listenForResponse: matched response! payload=\(String(messageStr.prefix(200)))")
-
-                    await MainActor.run { [responsePayload] in
-                        if let approved = responsePayload["approved"] as? Bool {
-                            Self.logger.info("listenForResponse: onPermissionResponse(sessionID=\(sessionID), approved=\(approved))")
-                            self.onPermissionResponse?(sessionID, approved)
-                        } else if let answer = responsePayload["answer"] as? String {
-                            Self.logger.info("listenForResponse: onQuestionResponse(sessionID=\(sessionID), answer=\(answer))")
-                            self.onQuestionResponse?(sessionID, answer)
-                        } else {
-                            Self.logger.warning("listenForResponse: matched requestId but no 'approved'/'answer', keys=\(Array(responsePayload.keys))")
-                        }
-                        self.pendingRequestID = nil
-                        self.pendingTask = nil
-                    }
-                    return
+                    await handleIncomingMessage(message)
                 }
             } catch {
-                Self.logger.error("listenForResponse: WebSocket error: \(error.localizedDescription), reconnecting in \(Int(backoff))s...")
+                if !Task.isCancelled {
+                    Self.logger.error("runWebSocketLoop: WebSocket error: \(error.localizedDescription)")
+                }
             }
 
             wsTask.cancel(with: .goingAway, reason: nil)
-            try? await Task.sleep(for: .seconds(backoff))
-            backoff = min(backoff * 2, 60)
+
+            guard !Task.isCancelled else { break }
+
+            let delay = Self.backoffDelay(failures: consecutiveFailures)
+            consecutiveFailures += 1
+            Self.logger.info("runWebSocketLoop: reconnecting in \(String(format: "%.1f", delay))s (attempt \(consecutiveFailures))")
+            try? await Task.sleep(for: .seconds(delay))
+
+            await pruneExpiredRequests()
         }
+
+        Self.logger.info("runWebSocketLoop: exiting (cancelled)")
+    }
+
+    private func handleIncomingMessage(_ message: URLSessionWebSocketTask.Message) {
+        let text: String
+        switch message {
+        case .string(let s):
+            text = s
+        case .data(let d):
+            guard let s = String(data: d, encoding: .utf8) else { return }
+            text = s
+        @unknown default:
+            return
+        }
+
+        Self.logger.debug("handleIncomingMessage: \(String(text.prefix(200)))")
+
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+
+        guard let messageStr = json["message"] as? String else {
+            Self.logger.debug("handleIncomingMessage: no 'message' field (event=\(json["event"] as? String ?? "unknown"))")
+            return
+        }
+
+        guard let messageData = messageStr.data(using: .utf8),
+              let responsePayload = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
+            Self.logger.warning("handleIncomingMessage: 'message' not valid JSON: \(String(messageStr.prefix(100)))")
+            return
+        }
+
+        guard let requestID = responsePayload["requestId"] as? String else {
+            Self.logger.debug("handleIncomingMessage: no 'requestId' in payload")
+            return
+        }
+
+        guard let pending = pendingRequests.removeValue(forKey: requestID) else {
+            Self.logger.debug("handleIncomingMessage: unknown requestID \(requestID), ignoring")
+            return
+        }
+
+        Self.logger.info("handleIncomingMessage: matched requestID=\(requestID)")
+
+        switch pending.kind {
+        case .permission(let sessionID):
+            if let approved = responsePayload["approved"] as? Bool {
+                Self.logger.info("handleIncomingMessage: onPermissionResponse(sessionID=\(sessionID), approved=\(approved))")
+                onPermissionResponse?(sessionID, approved)
+            } else {
+                Self.logger.warning("handleIncomingMessage: permission response missing 'approved' field")
+            }
+        case .question(let sessionID):
+            if let answer = responsePayload["answer"] as? String {
+                Self.logger.info("handleIncomingMessage: onQuestionResponse(sessionID=\(sessionID), answer=\(answer))")
+                onQuestionResponse?(sessionID, answer)
+            } else {
+                Self.logger.warning("handleIncomingMessage: question response missing 'answer' field")
+            }
+        }
+    }
+
+    private func pruneExpiredRequests() {
+        let cutoff = Date().addingTimeInterval(-600)
+        let expired = pendingRequests.filter { $0.value.createdAt <= cutoff }
+        for key in expired.keys {
+            pendingRequests.removeValue(forKey: key)
+        }
+        if !expired.isEmpty {
+            Self.logger.info("pruneExpiredRequests: removed \(expired.count) stale entries")
+        }
+    }
+
+    private nonisolated static func buildWebSocketURL(config: Config) -> URL? {
+        var urlString = config.server
+        if urlString.hasPrefix("https://") {
+            urlString = "wss://" + urlString.dropFirst(8)
+        } else if urlString.hasPrefix("http://") {
+            urlString = "ws://" + urlString.dropFirst(7)
+        }
+        urlString += "/\(config.responseTopic)/ws"
+        return URL(string: urlString)
+    }
+
+    private nonisolated static func backoffDelay(failures: Int) -> TimeInterval {
+        let base: TimeInterval = 5.0
+        let maxDelay: TimeInterval = 120.0
+        let jitter = Double.random(in: 0..<1.0)
+        return min(base * pow(2.0, Double(failures)) + jitter, maxDelay)
     }
 
     private func escapeJSON(_ string: String) -> String {

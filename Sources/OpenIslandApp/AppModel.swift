@@ -544,6 +544,7 @@ final class AppModel {
                 answer: QuestionPromptResponse(answer: answer)
             )
         }
+        ntfyNotifier.start()
     }
 
     // MARK: - Debug Session Logger
@@ -597,7 +598,7 @@ final class AppModel {
 
     private func stopNtfyMonitoring() {
         idleMonitor.stop()
-        ntfyNotifier.cancel()
+        ntfyNotifier.stop()
     }
 
     private func sendNtfyIfAway(for event: AgentEvent) {
