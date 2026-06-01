@@ -533,9 +533,18 @@ final class AppModel {
 
     private func startNtfyMonitoring() {
         idleMonitor.start()
-        ntfyNotifier.onPermissionResponse = { [weak self] sessionID, approved in
-            Self.ntfyLogger.info("onPermissionResponse callback fired: sessionID=\(sessionID), approved=\(approved)")
-            self?.approvePermission(for: sessionID, approved: approved)
+        ntfyNotifier.onPermissionResponse = { [weak self] sessionID, action in
+            Self.ntfyLogger.info("onPermissionResponse callback fired: sessionID=\(sessionID), action=\(action)")
+            guard let self else { return }
+            switch action {
+            case .deny:
+                self.approvePermission(for: sessionID, action: .deny)
+            case .allowOnce:
+                self.approvePermission(for: sessionID, action: .allowOnce)
+            case .alwaysAllow:
+                let updates = self.state.session(id: sessionID)?.permissionRequest?.suggestedUpdates ?? []
+                self.approvePermission(for: sessionID, action: .allowWithUpdates(updates))
+            }
         }
         ntfyNotifier.onQuestionResponse = { [weak self] sessionID, answer in
             Self.ntfyLogger.info("onQuestionResponse callback fired: sessionID=\(sessionID), answer=\(answer)")
@@ -601,7 +610,7 @@ final class AppModel {
         ntfyNotifier.stop()
     }
 
-    private func sendNtfyIfAway(for event: AgentEvent) {
+    private func sendNtfyIfAway(for event: AgentEvent, ingress: TrackedEventIngress) {
         guard ntfyEnabled else {
             Self.ntfyLogger.debug("sendNtfyIfAway: ntfy disabled")
             return
@@ -621,14 +630,14 @@ final class AppModel {
                 Self.ntfyLogger.warning("sendNtfyIfAway: session not found for permissionRequested, sessionID=\(payload.sessionID)")
                 return
             }
-            Self.ntfyLogger.info("sendNtfyIfAway: dispatching permission notification for sessionID=\(payload.sessionID)")
+            Self.ntfyLogger.info("sendNtfyIfAway: dispatching permission notification for sessionID=\(payload.sessionID), ingress=\(String(describing: ingress)), toolName=\(session.permissionRequest?.toolName ?? "nil"), summary=\(String((session.permissionRequest?.summary ?? "").prefix(80)))")
             ntfyNotifier.sendPermissionNotification(sessionID: payload.sessionID, session: session)
         case let .questionAsked(payload):
             guard let session = state.session(id: payload.sessionID) else {
                 Self.ntfyLogger.warning("sendNtfyIfAway: session not found for questionAsked, sessionID=\(payload.sessionID)")
                 return
             }
-            Self.ntfyLogger.info("sendNtfyIfAway: dispatching question notification for sessionID=\(payload.sessionID)")
+            Self.ntfyLogger.info("sendNtfyIfAway: dispatching question notification for sessionID=\(payload.sessionID), ingress=\(String(describing: ingress)), title=\(String(session.questionPrompt?.title.prefix(80) ?? "nil"))")
             ntfyNotifier.sendQuestionNotification(sessionID: payload.sessionID, session: session)
         default:
             break
@@ -1668,7 +1677,7 @@ final class AppModel {
             relay.notifyEvent(event, session: session)
         }
 
-        sendNtfyIfAway(for: event)
+        sendNtfyIfAway(for: event, ingress: ingress)
 
         if updateLastActionMessage {
             lastActionMessage = describe(event)

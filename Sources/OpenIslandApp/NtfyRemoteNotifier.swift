@@ -39,7 +39,21 @@ final class NtfyRemoteNotifier {
 
     var hasPendingRequests: Bool { !pendingRequests.isEmpty }
 
-    var onPermissionResponse: ((String, Bool) -> Void)?
+    enum PermissionAction: CustomStringConvertible {
+        case deny
+        case allowOnce
+        case alwaysAllow
+
+        var description: String {
+            switch self {
+            case .deny: "deny"
+            case .allowOnce: "allowOnce"
+            case .alwaysAllow: "alwaysAllow"
+            }
+        }
+    }
+
+    var onPermissionResponse: ((String, PermissionAction) -> Void)?
     var onQuestionResponse: ((String, String) -> Void)?
 
     // MARK: - Lifecycle
@@ -78,30 +92,55 @@ final class NtfyRemoteNotifier {
             createdAt: Date()
         )
 
-        Self.logger.info("Sending permission notification: sessionID=\(sessionID), requestID=\(requestID), tool=\(request.toolName ?? "nil"), pending=\(self.pendingRequests.count)")
+        Self.logger.info("""
+            Sending permission notification: sessionID=\(sessionID), requestID=\(requestID), pending=\(self.pendingRequests.count) \
+            | toolName=\(request.toolName ?? "nil") toolUseID=\(request.toolUseID ?? "nil") \
+            | title=\(request.title) \
+            | summary=\(request.summary) \
+            | affectedPath=\(request.affectedPath) \
+            | cwd=\(session.jumpTarget?.workingDirectory ?? "nil") \
+            | sessionTitle=\(session.title)
+            """)
 
-        let title = "Open Island: \(session.title) · \(request.toolName ?? "Permission")"
-        let message = request.summary.isEmpty ? request.title : request.summary
+        let workspace = session.jumpTarget?.workspaceName ?? session.title
+        let title = "\(workspace) · \(request.toolName ?? "Permission")"
+        let message: String = {
+            let cwd = session.jumpTarget?.workingDirectory ?? ""
+            if !request.affectedPath.isEmpty, request.affectedPath != cwd {
+                return request.affectedPath
+            }
+            return request.title
+        }()
 
         let responseURL = "\(config.server)/\(config.responseTopic)"
-        let actions: [[String: Any]] = [
-            [
-                "action": "http",
-                "label": "Approve",
-                "url": responseURL,
-                "method": "POST",
-                "body": "{\"requestId\":\"\(requestID)\",\"approved\":true}",
-                "clear": true,
-            ],
+        var actions: [[String: Any]] = [
             [
                 "action": "http",
                 "label": "Deny",
                 "url": responseURL,
                 "method": "POST",
-                "body": "{\"requestId\":\"\(requestID)\",\"approved\":false}",
+                "body": "{\"requestId\":\"\(requestID)\",\"action\":\"deny\"}",
+                "clear": true,
+            ],
+            [
+                "action": "http",
+                "label": "Allow Once",
+                "url": responseURL,
+                "method": "POST",
+                "body": "{\"requestId\":\"\(requestID)\",\"action\":\"allowOnce\"}",
                 "clear": true,
             ],
         ]
+        if request.toolName != nil {
+            actions.append([
+                "action": "http",
+                "label": "Always Allow",
+                "url": responseURL,
+                "method": "POST",
+                "body": "{\"requestId\":\"\(requestID)\",\"action\":\"alwaysAllow\"}",
+                "clear": true,
+            ])
+        }
 
         let body: [String: Any] = [
             "topic": config.topic,
@@ -128,15 +167,22 @@ final class NtfyRemoteNotifier {
             createdAt: Date()
         )
 
-        Self.logger.info("Sending question notification: sessionID=\(sessionID), requestID=\(requestID), pending=\(self.pendingRequests.count)")
+        Self.logger.info("""
+            Sending question notification: sessionID=\(sessionID), requestID=\(requestID), pending=\(self.pendingRequests.count) \
+            | promptTitle=\(prompt.title) \
+            | questions=\(prompt.questions.map { "[\($0.question) options=\($0.options.map(\.label))]" }) \
+            | cwd=\(session.jumpTarget?.workingDirectory ?? "nil") \
+            | sessionTitle=\(session.title)
+            """)
 
-        let title = "Open Island: \(session.title) · Question"
+        let workspace = session.jumpTarget?.workspaceName ?? session.title
+        let title = "\(workspace) · Question"
         let questionText = prompt.questions.first?.question ?? prompt.title
         let responseURL = "\(config.server)/\(config.responseTopic)"
 
         var actions: [[String: Any]] = []
         let options = prompt.questions.first?.options ?? []
-        for option in options.prefix(3) {
+        for option in options {
             actions.append([
                 "action": "http",
                 "label": option.label,
@@ -269,11 +315,17 @@ final class NtfyRemoteNotifier {
 
         switch pending.kind {
         case .permission(let sessionID):
-            if let approved = responsePayload["approved"] as? Bool {
-                Self.logger.info("handleIncomingMessage: onPermissionResponse(sessionID=\(sessionID), approved=\(approved))")
-                onPermissionResponse?(sessionID, approved)
+            if let actionStr = responsePayload["action"] as? String {
+                let action: PermissionAction
+                switch actionStr {
+                case "deny": action = .deny
+                case "alwaysAllow": action = .alwaysAllow
+                default: action = .allowOnce
+                }
+                Self.logger.info("handleIncomingMessage: onPermissionResponse(sessionID=\(sessionID), action=\(actionStr))")
+                onPermissionResponse?(sessionID, action)
             } else {
-                Self.logger.warning("handleIncomingMessage: permission response missing 'approved' field")
+                Self.logger.warning("handleIncomingMessage: permission response missing 'action' field")
             }
         case .question(let sessionID):
             if let answer = responsePayload["answer"] as? String {
