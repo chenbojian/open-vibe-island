@@ -88,6 +88,8 @@ final class OverlayPanelController {
 
         if interactive {
             presentPanel(panel, activates: Self.shouldActivatePanel(for: model?.notchOpenReason))
+        } else if panel.isKeyWindow {
+            panel.resignKey()
         }
     }
 
@@ -738,7 +740,7 @@ final class NotchHostingView<Content: View>: NSHostingView<Content> {
             return nil
         }
 
-        return super.hitTest(point) ?? self
+        return super.hitTest(point)
     }
 
     private func convertToScreen(_ viewPoint: NSPoint) -> NSPoint {

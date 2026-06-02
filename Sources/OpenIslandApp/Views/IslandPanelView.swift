@@ -232,11 +232,6 @@ struct IslandPanelView: View {
                 isHovering = hovering
             }
         }
-        .onTapGesture {
-            if model.notchStatus != .opened {
-                model.notchOpen(reason: .click)
-            }
-        }
     }
 
     private func syncOpenedSurfaceMount(with status: NotchStatus, immediate: Bool = false) {
