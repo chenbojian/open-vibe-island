@@ -243,11 +243,11 @@ final class OverlayPanelController {
     private func handleMouseMoved(_ screenLocation: NSPoint) {
         guard let model else { return }
 
-        let inClosedSurfaceArea = isPointInClosedSurfaceArea(screenLocation)
+        let inHoverArea = isPointInClosedPillArea(screenLocation)
 
-        if model.notchStatus == .closed && inClosedSurfaceArea {
+        if model.notchStatus == .closed && inHoverArea {
             scheduleHoverOpen()
-        } else if model.notchStatus == .closed && !inClosedSurfaceArea {
+        } else if model.notchStatus == .closed && !inHoverArea {
             cancelHoverOpen()
         }
 
@@ -267,9 +267,9 @@ final class OverlayPanelController {
     private func handleMouseDown(_ screenLocation: NSPoint) {
         guard let model else { return }
 
-        let inClosedSurfaceArea = isPointInClosedSurfaceArea(screenLocation)
+        let inPillArea = isPointInClosedPillArea(screenLocation)
 
-        if model.notchStatus == .closed && inClosedSurfaceArea {
+        if model.notchStatus == .closed && inPillArea {
             cancelHoverOpenImmediately()
             model.notchOpen(reason: .click)
         } else if model.notchStatus == .opened {
@@ -346,6 +346,28 @@ final class OverlayPanelController {
     }
 
     // MARK: - Hit testing geometry
+
+    /// Tight hit area for hover/click detection on the closed pill.
+    /// On notch displays: uses the physical notch rect (pill is hidden inside it).
+    /// On external displays: uses a rect matching the pill's visible bounds
+    /// (menu-bar height, not the taller rendering frame).
+    private func isPointInClosedPillArea(_ screenPoint: NSPoint) -> Bool {
+        guard let screen = resolveTargetScreen() else {
+            return false
+        }
+        if screen.safeAreaInsets.top > 0 {
+            return Self.rectContainsIncludingEdges(notchRect, point: screenPoint)
+        }
+        let menuBarHeight = screen.topStatusBarHeight
+        let pillWidth = NSScreen.externalDisplayNotchWidth
+        let pillRect = NSRect(
+            x: notchRect.midX - pillWidth / 2,
+            y: screen.frame.maxY - menuBarHeight,
+            width: pillWidth,
+            height: menuBarHeight
+        )
+        return Self.rectContainsIncludingEdges(pillRect, point: screenPoint)
+    }
 
     func isPointInClosedSurfaceArea(_ screenPoint: NSPoint) -> Bool {
         guard let model else { return false }

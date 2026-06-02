@@ -217,6 +217,11 @@ struct IslandPanelView: View {
                 }
 
                 v6ClosedSurface()
+                    .onHover { hovering in
+                        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
+                            isHovering = hovering
+                        }
+                    }
                     .opacity(usesOpenedVisualState ? 0 : 1)
                     .allowsHitTesting(!usesOpenedVisualState)
             }
@@ -226,12 +231,6 @@ struct IslandPanelView: View {
         .padding(.horizontal, panelShadowHorizontalInset)
         .padding(.bottom, panelShadowBottomInset)
         .animation(notchTransitionAnimation, value: model.notchStatus)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
-                isHovering = hovering
-            }
-        }
     }
 
     private func syncOpenedSurfaceMount(with status: NotchStatus, immediate: Bool = false) {
