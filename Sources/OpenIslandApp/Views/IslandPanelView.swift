@@ -2,6 +2,14 @@ import SwiftUI
 @preconcurrency import MarkdownUI
 import OpenIslandCore
 
+private struct ClosedPillFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero { value = next }
+    }
+}
+
 private struct NotificationContentHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -217,6 +225,18 @@ struct IslandPanelView: View {
                 }
 
                 v6ClosedSurface()
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: ClosedPillFrameKey.self,
+                                value: geo.frame(in: .global)
+                            )
+                        }
+                    )
+                    .onPreferenceChange(ClosedPillFrameKey.self) { frame in
+                        model.closedPillFrame = frame
+                    }
+                    .contentShape(V6ClosedPillShape())
                     .onHover { hovering in
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
                             isHovering = hovering

@@ -1,10 +1,12 @@
 import AppKit
 import Combine
+import os
 import SwiftUI
 import OpenIslandCore
 
 @MainActor
 final class OverlayPanelController {
+    private static let logger = Logger(subsystem: "app.openisland", category: "OverlayPanel")
     private static let preferredNotchOpenedPanelWidth: CGFloat = 540
     private static let preferredTopBarOpenedPanelWidth: CGFloat = 520
     private static let preferredNotificationPanelWidth: CGFloat = 620
@@ -270,6 +272,7 @@ final class OverlayPanelController {
         let inPillArea = isPointInClosedPillArea(screenLocation)
 
         if model.notchStatus == .closed && inPillArea {
+            Self.logger.notice("clickOpen: mouse=(\(screenLocation.x, privacy: .public), \(screenLocation.y, privacy: .public)) notchRect=(\(self.notchRect.minX, privacy: .public), \(self.notchRect.minY, privacy: .public), \(self.notchRect.width, privacy: .public)×\(self.notchRect.height, privacy: .public))")
             cancelHoverOpenImmediately()
             model.notchOpen(reason: .click)
         } else if model.notchStatus == .opened {
@@ -305,6 +308,10 @@ final class OverlayPanelController {
 
     private func performHoverOpen(_ model: AppModel) {
         guard model.notchStatus == .closed else { return }
+
+        let mouseLocation = NSEvent.mouseLocation
+        let pillArea = closedPillScreenRect
+        Self.logger.notice("hoverOpen: mouse=(\(mouseLocation.x, privacy: .public), \(mouseLocation.y, privacy: .public)) pillScreenRect=(\(pillArea.minX, privacy: .public), \(pillArea.minY, privacy: .public), \(pillArea.width, privacy: .public)×\(pillArea.height, privacy: .public)) pillFrame=(\(model.closedPillFrame.minX, privacy: .public), \(model.closedPillFrame.minY, privacy: .public), \(model.closedPillFrame.width, privacy: .public)×\(model.closedPillFrame.height, privacy: .public))")
 
         if model.hapticFeedbackEnabled {
             NSHapticFeedbackManager.defaultPerformer.perform(
@@ -347,25 +354,30 @@ final class OverlayPanelController {
 
     // MARK: - Hit testing geometry
 
-    /// Tight hit area for hover/click detection on the closed pill.
-    /// On notch displays: uses the physical notch rect (pill is hidden inside it).
-    /// On external displays: uses a rect matching the pill's visible bounds
-    /// (menu-bar height, not the taller rendering frame).
-    private func isPointInClosedPillArea(_ screenPoint: NSPoint) -> Bool {
-        guard let screen = resolveTargetScreen() else {
-            return false
+    /// The pill's actual screen-coordinate bounding rect, derived from
+    /// the SwiftUI-measured frame reported via `model.closedPillFrame`.
+    private var closedPillScreenRect: NSRect {
+        guard let panel, let model, model.closedPillFrame != .zero else {
+            return notchRect
         }
-        if screen.safeAreaInsets.top > 0 {
-            return Self.rectContainsIncludingEdges(notchRect, point: screenPoint)
-        }
-        let menuBarHeight = screen.topStatusBarHeight
-        let pillWidth = NSScreen.externalDisplayNotchWidth
-        let pillRect = NSRect(
-            x: notchRect.midX - pillWidth / 2,
-            y: screen.frame.maxY - menuBarHeight,
-            width: pillWidth,
-            height: menuBarHeight
+        let frame = model.closedPillFrame
+        // SwiftUI .global coordinate space uses top-left origin within the window.
+        // Convert to AppKit's bottom-left window coordinates, then to screen.
+        let windowRect = NSRect(
+            x: frame.origin.x,
+            y: panel.frame.height - frame.origin.y - frame.height,
+            width: frame.width,
+            height: frame.height
         )
+        return panel.convertToScreen(windowRect)
+    }
+
+    /// Tight hit area for hover/click detection on the closed pill.
+    /// Uses the pill's actual rendered frame (reported by SwiftUI) so
+    /// detection matches the visible black area precisely.
+    private func isPointInClosedPillArea(_ screenPoint: NSPoint) -> Bool {
+        let pillRect = closedPillScreenRect
+        guard pillRect != .zero else { return false }
         return Self.rectContainsIncludingEdges(pillRect, point: screenPoint)
     }
 
