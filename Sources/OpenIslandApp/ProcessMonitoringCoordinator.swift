@@ -116,6 +116,8 @@ final class ProcessMonitoringCoordinator {
 
         // Adopt process TTYs inline on local copy.
         adoptProcessTTYsForClaudeSessions(activeProcesses: activeProcesses, sessions: &local)
+        // Upgrade "Unknown" terminalApp for sessions already matched by TTY.
+        upgradeUnknownTerminalApps(activeProcesses: activeProcesses, sessions: &local)
 
         // Detect Codex.app running state BEFORE the empty-sessions early
         // return — we need to fire the callback on a brand-new Codex.app
@@ -807,6 +809,40 @@ final class ProcessMonitoringCoordinator {
             localState = SessionState(sessions: sessions)
         }
         return changed
+    }
+
+    /// When a session's terminalApp is "Unknown" but we can match it to a live
+    /// process by TTY, upgrade the terminalApp from the process snapshot.
+    /// This fixes transcript-discovered sessions whose JSONL has no terminal info.
+    private func upgradeUnknownTerminalApps(
+        activeProcesses: [ActiveProcessSnapshot],
+        sessions localState: inout SessionState
+    ) {
+        let claudeProcesses = activeProcesses.filter { $0.tool == .claudeCode }
+        guard !claudeProcesses.isEmpty else { return }
+
+        var sessions = localState.sessions
+        var changed = false
+
+        for index in sessions.indices {
+            let session = sessions[index]
+            guard session.tool == .claudeCode,
+                  !isSyntheticClaudeSession(session),
+                  session.jumpTarget?.terminalApp == "Unknown",
+                  let sessionTTY = normalizedTTYForMatching(session.jumpTarget?.terminalTTY),
+                  let process = claudeProcesses.first(where: {
+                      normalizedTTYForMatching($0.terminalTTY) == sessionTTY
+                  }),
+                  let knownApp = supportedTerminalApp(for: process.terminalApp) else {
+                continue
+            }
+            sessions[index].jumpTarget?.terminalApp = knownApp
+            changed = true
+        }
+
+        if changed {
+            localState = SessionState(sessions: sessions)
+        }
     }
 
     // MARK: - Cross-tool sanitization
