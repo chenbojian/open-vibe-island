@@ -786,7 +786,6 @@ final class ProcessMonitoringCoordinator {
 
                 sessions[index].jumpTarget?.terminalTTY = processTTY
                 sessions[index].attachmentState = .attached
-                sessions[index].updatedAt = .now
                 changed = true
                 break
             }
