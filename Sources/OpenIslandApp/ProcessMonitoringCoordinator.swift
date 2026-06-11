@@ -529,12 +529,24 @@ final class ProcessMonitoringCoordinator {
         activeProcesses: [ActiveProcessSnapshot],
         now: Date = .now
     ) -> [AgentSession] {
+        let oldSyntheticByID = Dictionary(
+            uniqueKeysWithValues: existingSessions
+                .filter { isSyntheticClaudeSession($0) }
+                .map { ($0.id, $0) }
+        )
         let baseSessions = existingSessions.filter { !isSyntheticClaudeSession($0) }
-        let syntheticSessions = syntheticClaudeSessions(
+        var syntheticSessions = syntheticClaudeSessions(
             existingSessions: baseSessions,
             activeProcesses: activeProcesses,
             now: now
         )
+        // Preserve the first-seen updatedAt for already-known synthetic sessions
+        // so they don't get stamped with .now on every monitoring cycle.
+        for index in syntheticSessions.indices {
+            if let old = oldSyntheticByID[syntheticSessions[index].id] {
+                syntheticSessions[index].updatedAt = old.updatedAt
+            }
+        }
 
         return baseSessions + syntheticSessions
     }
