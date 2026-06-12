@@ -576,6 +576,33 @@ final class ProcessMonitoringCoordinator {
             .map { syntheticClaudeSession(for: $0, now: now) }
     }
 
+    /// Most-recent transcript modification date for a given working directory.
+    /// Falls back to `fallback` when no transcript is found.
+    private func latestTranscriptDate(for workingDirectory: String?, fallback: Date) -> Date {
+        guard let cwd = workingDirectory, !cwd.isEmpty else { return fallback }
+        // Claude encodes CWD by replacing every "/" with "-", preserving the
+        // leading slash as a leading "-". The macOS filesystem is case-insensitive
+        // so we pass the slug as-is and let the FS resolve it.
+        let projectSlug = cwd.replacingOccurrences(of: "/", with: "-")
+        let transcriptDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects/\(projectSlug)", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: transcriptDir,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return fallback }
+        var latest: Date = .distantPast
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "jsonl",
+                  !url.path.contains("/subagents/"),
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate else { continue }
+            if modified > latest { latest = modified }
+        }
+        return latest > .distantPast ? latest : fallback
+    }
+
     private func syntheticClaudeSession(
         for process: ActiveProcessSnapshot,
         now: Date
@@ -584,6 +611,7 @@ final class ProcessMonitoringCoordinator {
         let workspaceName = workingDirectory.map { WorkspaceNameResolver.workspaceName(for: $0) } ?? "Workspace"
         let terminalApp = supportedTerminalApp(for: process.terminalApp) ?? "Unknown"
         let identity = processIdentityKey(process)
+        let activityDate = latestTranscriptDate(for: workingDirectory, fallback: now)
 
         var session = AgentSession(
             id: "\(syntheticClaudeSessionPrefix)\(identity)",
@@ -593,7 +621,7 @@ final class ProcessMonitoringCoordinator {
             attachmentState: .attached,
             phase: .completed,
             summary: "Claude session detected from \(terminalApp).",
-            updatedAt: now,
+            updatedAt: activityDate,
             jumpTarget: JumpTarget(
                 terminalApp: terminalApp,
                 workspaceName: workspaceName,
